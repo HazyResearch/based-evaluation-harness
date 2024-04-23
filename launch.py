@@ -23,6 +23,8 @@ def execute_config(
     limit: int,
     output_dir: str,
     num_fewshot: int,
+    context_length: int = 1000,
+    cutting_context: bool = False,
 ):
     # Save the original standard output
     import subprocess
@@ -41,6 +43,16 @@ def execute_config(
         "--num_fewshot", str(num_fewshot)
     ]
 
+    if cutting_context:
+        args.extend(["--cutting_context"])
+        args.extend(["--context_length", str(context_length)])
+        args.extend(["--context_key", "text"])
+
+        if 'squad' not in task:
+            args.extend(["--answer_key", "key", "value"])
+        else:
+            args.extend(["--answer_key", "value"])
+
     if limit is not None:
         args.extend(["--limit", str(limit)])
     
@@ -56,6 +68,8 @@ def execute_config(
 @click.option("--batch-size", default=8, type=int)
 @click.option("--limit", default=None, type=int)
 @click.option("--num_fewshot", default=0, type=int)
+@click.option("--context_length", default=1000, type=int)
+@click.option("--cutting_context", is_flag=True)
 def main(
     model: List[str], 
     task: List[str], 
@@ -64,6 +78,8 @@ def main(
     parallelize: bool, 
     gpus: str,
     num_fewshot: int = 0,
+    context_length: int = 1000,
+    cutting_context: bool = False
 ):
 
     if gpus is not None:
@@ -94,6 +110,8 @@ def main(
                 limit=limit,
                 output_dir=output_dir,
                 num_fewshot=num_fewshot,
+                context_length=context_length,
+                cutting_context=cutting_context
             )
     else:
         completed = 0
@@ -109,8 +127,6 @@ def main(
             print(f"Completed: {completed} ({completed / total:0.1%}) | Total: {total}")
 
         ray.shutdown()
-
-
 
 if __name__ == "__main__":
     main()

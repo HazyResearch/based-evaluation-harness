@@ -33,8 +33,19 @@ class SWDE(ConfigurableTask):
     def validation_docs(self):
         return self.dataset["validation"]
 
+
     def doc_to_text(self, doc):
-        return doc["text"]
+        while doc["text"].find("Summary of information above...")>=0:
+            doc["text"] = doc["text"].split("Summary of information above...")[0]
+        
+        question = doc["key"]+":"
+        while(doc["text"].endswith(question)):
+            doc["text"] = doc["text"][:-len(question)]
+        
+        key = doc['key'][0].upper() + doc['key'][1:]
+        out = doc["text"] + " " + key + ":"
+        return out
+
 
     def doc_to_target(self, doc):
         return doc["value"]

@@ -21,14 +21,14 @@ def execute_config(
     task: str,
     batch_size: int,
     limit: int,
-    output_dir: str
+    output_dir: str,
+    context_length: int = 1000,
+    cutting_context: bool = False,
 ):
     # Save the original standard output
     import subprocess
 
     output_dir = os.path.join(output_dir, model, task)
-
-    # breakpoint()
 
     if 'mamba' in model.lower(): model_name = "mamba_ssm"
     else: model_name = 'hf-auto'
@@ -44,6 +44,11 @@ def execute_config(
         "--output_path", output_dir
     ]
 
+    if cutting_context:
+        args.extend(["--cutting_context"])
+        args.extend(["--context_length", str(context_length)])
+        args.extend(["--context_key", "text"])
+
     if limit is not None:
         args.extend(["--limit", str(limit)])
     
@@ -58,13 +63,17 @@ def execute_config(
 @click.option("--gpus", default=None, type=str)
 @click.option("--batch-size", default=8, type=int)
 @click.option("--limit", default=None, type=int)
+@click.option("--context_length", default=1000, type=int)
+@click.option("--cutting_context", is_flag=True)
 def main(
     model: List[str], 
     task: List[str], 
     batch_size: int,
     limit: Optional[int],
     parallelize: bool, 
-    gpus: str
+    gpus: str,
+    context_length: int,
+    cutting_context: bool
 ):
 
     if gpus is not None:
@@ -84,7 +93,7 @@ def main(
 
     print(f"Running sweep with {len(configs)} configs")
 
-    output_dir = f"output/{datetime.now().strftime('%y-%m-%d_%H-%M')}"
+    output_dir = f"output_trivia/{datetime.now().strftime('%y-%m-%d_%H-%M')}"
 
     # Run each script in parallel using Ray
     if not use_ray:
@@ -93,7 +102,9 @@ def main(
                 **config,
                 batch_size=batch_size,
                 limit=limit,
-                output_dir=output_dir
+                output_dir=output_dir,
+                context_length=context_length,
+                cutting_context=cutting_context
             )
     else:
         completed = 0

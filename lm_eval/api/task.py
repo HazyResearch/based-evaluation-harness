@@ -245,7 +245,6 @@ class Task(abc.ABC):
             - `datasets.DownloadMode.FORCE_REDOWNLOAD`
                 Fresh download and fresh dataset.
         """
-        breakpoint()
         self.dataset = datasets.load_dataset(
             path=self.DATASET_PATH,
             name=self.DATASET_NAME,
@@ -349,7 +348,114 @@ class Task(abc.ABC):
     def doc_to_target(self, doc):
         pass
 
-    def build_all_requests(self, limit=None, rank=None, world_size=None) -> None:
+
+    def truncate_context(self, 
+        doc, doc_id, tokenizer = None, context_length = 1000, sequence_length = 2048, context_key = "context", cutting_context = False, answer_key = ["value"], id_start=0
+    ):
+        """
+        Custom Code for the Just Read Twice Project
+        """
+
+        instances = []
+        new_doc_set = {}
+        pad = (context_length // 2) + 50
+        doc_tokens = tokenizer.batch_encode_plus(
+            [doc[context_key]], return_tensors="pt", 
+            padding=True, truncation=True, 
+            max_length=sequence_length,
+        )['input_ids'][0]
+        start = int(0)
+        already_moving = False
+        already_end = False
+
+        while start < len(doc_tokens):
+
+            # select a region of the document
+            context_tokens = doc_tokens[start: min(start + context_length - pad, len(doc_tokens))]
+            context = tokenizer.decode(context_tokens)
+
+            pos_start = -1
+            answer_appears = True
+            for key in answer_key:
+                answer = doc[key]
+                if(answer == "" or len(answer) <= 1):
+                    continue
+
+                # find the answr in the context
+                answer_pattern = re.compile(re.escape(answer), re.IGNORECASE)
+                if answer_match := answer_pattern.search(context):
+                    if pos_start == -1 or pos_start > answer_match.start():
+                        pos_start = answer_match.start()
+                else:
+                    answer_appears = False
+
+            if len(answer_key) == 0: # and context_key in ['article']:
+                # For summarization datasets
+                answer_appears = True
+                pos_start = 0
+
+            # if we found the answer in the context
+            if answer_appears and pos_start > -1:
+
+                # fill the context length to context_length - pad
+                if start > 0 and len(doc_tokens) - start < context_length - pad and not already_end:
+                    start = max(0, len(doc_tokens) - (context_length - pad) - 1)
+                    already_end = True
+                    # print(doc_id, "###begin to fill the text to context length", start, pos_start)
+                    continue
+
+                # if label/answer appears at the begining, move start position a little bit forward
+                if start > (context_length - pad)/4 and pos_start * 4 < len(context) and not already_moving:
+                    start = max(0, int(start - (context_length-pad)/4))
+                    already_moving = True
+                    # print(doc_id, "###begin to move chunking starting position", start, pos_start)
+                    continue
+
+                already_moving = False
+
+                # save the new document and request
+                doc_short = dict(doc)
+                doc_short["new_id"] = id_start + 1
+                doc_short[context_key] = context
+                fewshot_ctx = self.fewshot_context(
+                    doc_short,
+                    0 if self.config.num_fewshot is None else self.config.num_fewshot,
+                ) 
+                inst = self.construct_requests(
+                    doc=doc_short,
+                    ctx=fewshot_ctx,
+                    metadata=(self.config["task"], doc_short["new_id"], self.config.repeats),
+                )
+                new_doc_set[doc_short["new_id"]] = doc_short
+                if not isinstance(inst, list):
+                    inst = [inst]
+                instances.extend(inst)
+
+                id_start += 1
+
+                if len(answer_key) == 0: # and context_key in ['article']:
+                    # For summarization datasets
+                    already_end = True
+
+            start += context_length - pad
+            if already_end:
+                break
+        
+        try:
+            if len(answer_key) == 0: #and context_key in ['article']:
+                # For summarization datasets
+                assert len(instances) == 1, print(f"Just keeping the first context_length tokens...")
+        except:
+            breakpoint()
+        return instances, new_doc_set
+
+
+    def build_all_requests(
+        self, limit=None, rank=None, world_size=None,
+
+        # additions 
+        tokenizer = None, context_length = 1000, sequence_length = 2048, context_key = "context", cutting_context = False, answer_key = ["value"]
+    ) -> None:
         """Build a set of Instances for a task, and store them in task.instances"""
         if self.has_test_docs():
             docs = self.test_docs()
@@ -361,28 +467,43 @@ class Task(abc.ABC):
         eval_logger.info(f"Building contexts for {self.config.task} on rank {rank}...")
 
         instances = []
+        new_doc_set = {} 
+
+        print("cutting_context:", cutting_context, context_length)
         for doc_id, doc in utils.create_iterator(
             enumerate(docs), rank, world_size, limit
         ):
-            # sample fewshot context #TODO: need to offset doc_id by rank now!
-            fewshot_ctx = self.fewshot_context(
-                doc,
-                0 if self.config.num_fewshot is None else self.config.num_fewshot,
-            )
+            
+            if cutting_context:
+                new_instances, doc_set = self.truncate_context(
+                    doc, doc_id, tokenizer = tokenizer, context_length = context_length, sequence_length = sequence_length, context_key = context_key, cutting_context = cutting_context, answer_key = answer_key, id_start=len(instances)
+                )
+                instances += new_instances
+                new_doc_set.update(doc_set)
 
-            # TODO: we should override self.config.repeats if doing greedy gen so users don't waste time+compute
-            inst = self.construct_requests(
-                doc=doc,
-                ctx=fewshot_ctx,
-                metadata=(self.config["task"], doc_id, self.config.repeats),
-            )
+            else:
+                # sample fewshot context #TODO: need to offset doc_id by rank now!
+                fewshot_ctx = self.fewshot_context(
+                    doc,
+                    0 if self.config.num_fewshot is None else self.config.num_fewshot,
+                )
 
-            if not isinstance(inst, list):
-                inst = [inst]
+                # TODO: we should override self.config.repeats if doing greedy gen so users don't waste time+compute
+                inst = self.construct_requests(
+                    doc=doc,
+                    ctx=fewshot_ctx,
+                    metadata=(self.config["task"], doc_id, self.config.repeats),
+                )
 
-            instances.extend(inst)
+                if not isinstance(inst, list):
+                    inst = [inst]
+
+                new_doc_set[doc_id] = doc
+                instances.extend(inst)
         self._instances = instances
         assert len(self._instances) != 0, "task.build_requests() did not find any docs!"
+        return new_doc_set
+    
 
     @abc.abstractmethod
     def construct_requests(self, doc, ctx, **kwargs):
@@ -773,6 +894,7 @@ class ConfigurableTask(Task):
                     )
 
     def download(self, dataset_kwargs=None) -> None:
+        # self.dataset = datasets.load_dataset('mlqa', 'mlqa-translate-train.ar')
         self.dataset = datasets.load_dataset(
             path=self.DATASET_PATH,
             name=self.DATASET_NAME,

@@ -43,6 +43,13 @@ def simple_evaluate(
     random_seed: int = 0,
     numpy_random_seed: int = 1234,
     torch_random_seed: int = 1234,
+
+    # additions
+    context_length: int = 1000,
+    sequence_length: int = 2048,
+    context_key: str = "context",
+    answer_key: list = ["value"],
+    cutting_context: bool = False,
 ):
     """Instantiate and evaluate a model on a list of tasks.
 
@@ -196,6 +203,15 @@ def simple_evaluate(
         write_out=write_out,
         log_samples=log_samples,
         verbosity=verbosity,
+
+        # additions
+        context_length = context_length,
+        sequence_length = sequence_length,
+        context_key = context_key,
+        answer_key = answer_key,
+        cutting_context=cutting_context,
+
+        model_name=model_args,
     )
 
     if lm.rank == 0:
@@ -239,6 +255,15 @@ def evaluate(
     write_out: bool = False,
     log_samples: bool = True,
     verbosity: str = "INFO",
+
+    # additions
+    context_length: int = 1000,
+    sequence_length: int = 2048,
+    context_key: str = "context",
+    answer_key: list = ["value"],
+    cutting_context: bool = False,
+
+    model_name='other',
 ):
     """Instantiate and evaluate a model on a list of tasks.
 
@@ -332,7 +357,9 @@ def evaluate(
                 raise RuntimeError("Task has neither test_docs nor validation_docs")
             limit = int(len(task_docs) * limit) if limit < 1.0 else int(limit)
 
-        task.build_all_requests(limit=limit, rank=lm.rank, world_size=lm.world_size)
+        # for cutting context
+        # task.build_all_requests(limit=limit, rank=lm.rank, world_size=lm.world_size)
+        new_doc_set = task.build_all_requests(limit=limit, rank=lm.rank, world_size=lm.world_size, tokenizer = lm.tokenizer, context_length = context_length, sequence_length = sequence_length, context_key = context_key, cutting_context = cutting_context, answer_key = answer_key)
 
         eval_logger.debug(
             f"Task: {task_name}; number of requests on this rank: {len(task.instances)}"
@@ -377,7 +404,11 @@ def evaluate(
                 cloned_reqs.extend([req] * req.repeats)
 
         # run requests through model
-        resps = getattr(lm, reqtype)(cloned_reqs)
+        if 'based' in model_name.lower():
+            with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+                resps = getattr(lm, reqtype)(cloned_reqs)
+        else:
+            resps = getattr(lm, reqtype)(cloned_reqs)
 
         # put responses from model into a list of length K for each request.
         for x, req in zip(resps, cloned_reqs):
@@ -416,7 +447,7 @@ def evaluate(
                     enumerate(task.validation_docs()), lm.rank, limit, lm.world_size
                 )
             )
-            for doc_id, doc in doc_iterator:
+            for doc_id, doc in new_doc_set.items():
                 # subset instances to only this document id ; sort by idx
                 requests = list(filter(lambda x: x.doc_id == doc_id, task.instances))
                 requests.sort(key=lambda x: x.idx)
